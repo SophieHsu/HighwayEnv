@@ -27,7 +27,7 @@ class MergeEnv(AbstractEnv):
                 "collision_reward": -1,
                 "right_lane_reward": 0.1,
                 "high_speed_reward": 0.2,
-                "reward_speed_range": [20, 30],
+                "reward_speed_range": [15, 38],
                 "merging_speed_reward": -0.5,
                 "lane_change_reward": -0.05,
             }
@@ -178,3 +178,242 @@ class MergeEnv(AbstractEnv):
         merging_v.target_speed = 30
         road.vehicles.append(merging_v)
         self.vehicle = ego_vehicle
+
+class MultiMergeEnv(MergeEnv):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def default_config(cls) -> dict:
+        cfg = super().default_config()
+        cfg.update(
+            {
+                "action": {'type': 'NotiAction'},
+                "observation": {
+                    "type": "Kinematics",
+                    "vehicles_count": 10,
+                    "features": ["presence", "x", "y", "vx", "vy", "cos_h", "sin_h"],
+                    "features_range": {
+                        "x": [-100, 200],
+                        "y": [-100, 200],
+                        "vx": [-20, 30],
+                        "vy": [-20, 30]
+                    },
+                    "absolute": False,
+                    "order": "sorted"
+                }
+            }
+        )
+        return cfg
+
+    def _info(self, obs: Observation, action: Action | None = None) -> dict:
+        """
+        Return a dictionary of additional information
+
+        :param obs: current observation
+        :param action: current action
+        :return: info dict
+        """
+        info = {
+            "speed": self.vehicle.speed,
+            "crashed": self.vehicle.crashed,
+            "action": action,
+        }
+        try:
+            info["rewards"] = self._rewards(action[-1])
+        except NotImplementedError:
+            pass
+        return info
+
+    def _make_road(self) -> None:
+        """
+        Make a road composed of a straight highway and three sequential merging lanes.
+
+        :return: the road
+        """
+        net = RoadNetwork()
+
+        # Highway lanes
+        self.ends = [80, 80, 80, 160]  # Before, converging, merge, after
+        self.one_merge_length = sum(self.ends[1:3])
+        c, s, n = LineType.CONTINUOUS_LINE, LineType.STRIPED, LineType.NONE
+        y = [0, StraightLane.DEFAULT_WIDTH]
+        line_type = [[c, s], [n, c]]
+        line_type_merge_right = [[c, s], [n, s]]
+        line_type_merge_left = [[n, s], [n, c]]
+        for i in range(2):
+            net.add_lane(
+                "a",
+                "b",
+                StraightLane([0, y[i]], [sum(self.ends[:2]), y[i]], line_types=line_type[i]),
+            )
+            net.add_lane(
+                "b",
+                "c",
+                StraightLane(
+                    [sum(self.ends[:2]), y[i]],
+                    [sum(self.ends[:3]), y[i]],
+                    line_types=line_type_merge_right[i],
+                ),
+            )
+            net.add_lane(
+                "c",
+                "c0",
+                StraightLane(
+                    [sum(self.ends[:3]), y[i]], [sum(self.ends[:3])+self.ends[0], y[i]], line_types=line_type[i]
+                ),
+            )
+            net.add_lane(
+                "c0",
+                "d",
+                StraightLane(
+                    [sum(self.ends[:3])+self.ends[0], y[i]], [sum(self.ends), y[i]], line_types=line_type_merge_left[i]
+                ),
+            )
+            net.add_lane(
+                "d",
+                "e",
+                StraightLane([sum(self.ends), y[i]], [sum(self.ends)+self.ends[0], y[i]], line_types=line_type[i])
+            )
+            net.add_lane(
+                "e",
+                "f",
+                StraightLane([sum(self.ends)+self.ends[0], y[i]], [sum(self.ends)+sum(self.ends[:2]), y[i]], line_types=line_type_merge_right[i])
+            )
+            net.add_lane(
+                "f",
+                "g",
+                StraightLane([sum(self.ends)+sum(self.ends[:2]), y[i]], [sum(self.ends)+sum(self.ends[:3]), y[i]], line_types=line_type[i])
+            )
+            net.add_lane(
+                "g",
+                "h",
+                StraightLane([sum(self.ends)+sum(self.ends[:3]), y[i]], [sum(self.ends)*2+self.ends[-1], y[i]], line_types=line_type[i])
+            )
+
+        # First right merging lane (merges first)
+        amplitude = 3.25
+        ljk = StraightLane(
+            [0, 6.5 + 4 + 4], [self.ends[0], 6.5 + 4 + 4], line_types=[c, c], forbidden=True
+        )
+        lkb = SineLane(
+            ljk.position(self.ends[0], -amplitude),
+            ljk.position(sum(self.ends[:2]), -amplitude),
+            amplitude,
+            2 * np.pi / (2 * self.ends[1]),
+            np.pi / 2,
+            line_types=[c, c],
+            forbidden=True,
+        )
+        lbc = StraightLane(
+            lkb.position(self.ends[1], 0),
+            lkb.position(self.ends[1], 0) + [self.ends[2], 0],  # Shorter merge section
+            line_types=[n, c],
+            forbidden=True,
+        )
+        net.add_lane("j", "k", ljk)
+        net.add_lane("k", "b", lkb)
+        net.add_lane("b", "c", lbc)
+
+        # Left merging lane (merges second)
+        lmn = StraightLane(
+            [self.one_merge_length, -6.5 - 4 ], [self.one_merge_length+self.ends[0], -6.5 - 4 ], line_types=[c, c], forbidden=True
+        )
+        lnb = SineLane(
+            lmn.position(self.ends[0], amplitude),
+            lmn.position(sum(self.ends[:2]), amplitude),
+            amplitude,
+            2 * np.pi / (2 * self.ends[1]),
+            -np.pi / 2,
+            line_types=[c, c],
+            forbidden=True,
+        )
+        lde = StraightLane(
+            lnb.position(self.ends[1], 0),  # Start position
+            lnb.position(self.ends[1], 0) + [self.ends[2], 0],  # End position with merge section
+            line_types=[c, s],
+            forbidden=True,
+        )
+        net.add_lane("m", "n", lmn)
+        net.add_lane("n", "c", lnb)
+        net.add_lane("c", "d", lde)
+
+        # Second right merging lane (merges last)
+        lpq = StraightLane(
+            [self.one_merge_length*2, 6.5 + 4 + 4], [self.one_merge_length*2+self.ends[0], 6.5 + 4 + 4], line_types=[c, c], forbidden=True
+        )
+        lqb = SineLane(
+            lpq.position(self.ends[0], -amplitude),
+            lpq.position(sum(self.ends[:2]), -amplitude),
+            amplitude,
+            2 * np.pi / (2 * self.ends[1]),
+            np.pi / 2,
+            line_types=[c, c],
+            forbidden=True,
+        )
+        lef = StraightLane(
+            lqb.position(self.ends[1], 0),
+            lqb.position(self.ends[1], 0) + [self.ends[2], 0],  # Longer merge section
+            line_types=[n, c],
+            forbidden=True,
+        )
+        net.add_lane("p", "q", lpq)
+        net.add_lane("q", "d", lqb)
+        net.add_lane("d", "e", lef)
+
+        road = Road(
+            network=net,
+            np_random=self.np_random,
+            record_history=self.config["show_trajectories"],
+        )
+        road.objects.append(Obstacle(road, lbc.position(self.ends[2], 0)))  # First merge point
+        road.objects.append(Obstacle(road, lde.position(self.ends[2], 0)))  # Second merge point
+        road.objects.append(Obstacle(road, lef.position(self.ends[2], 0)))  # Third merge point
+        self.road = road
+
+    def _make_vehicles(self) -> None:
+        """
+        Populate a road with several vehicles on the highway and on the merging lanes, as well as an ego-vehicle.
+
+        :return: the ego-vehicle
+        """
+        road = self.road
+        ego_vehicle = self.action_type.vehicle_class(
+            road, road.network.get_lane(("a", "b", 1)).position(30, 0), speed=30
+        )
+        road.vehicles.append(ego_vehicle)
+
+        other_vehicles_type = utils.class_from_path(self.config["other_vehicles_type"])
+
+        for position, speed in [(90, 29), (70, 31), (5, 31.5), (120, 29.5), (140, 30.0), (170, 27.5), (200, 27.5), (230, 30.5)]:
+            lane = road.network.get_lane(("a", "b", self.np_random.integers(2)))
+            position = lane.position(position + self.np_random.uniform(-5, 5), 0)
+            speed += self.np_random.uniform(-1, 1)
+            road.vehicles.append(other_vehicles_type(road, position, speed=speed))
+
+        # # First right merging vehicle (merges first)
+        # merging_v_right1 = other_vehicles_type(
+        #     road, road.network.get_lane(("j", "k", 0)).position(40, 0), speed=20
+        # )
+        # merging_v_right1.target_speed = 30
+        # road.vehicles.append(merging_v_right1)
+
+        # # Left merging vehicle (merges second)
+        # merging_v_left = other_vehicles_type(
+        #     road, road.network.get_lane(("m", "n", 0)).position(40, 0), speed=10
+        # )
+        # merging_v_left.target_speed = 30
+        # road.vehicles.append(merging_v_left)
+
+        # # Second right merging vehicle (merges last)
+        # merging_v_right2 = other_vehicles_type(
+        #     road, road.network.get_lane(("p", "q", 0)).position(40, 0), speed=0
+        # )
+        # merging_v_right2.target_speed = 30
+        # road.vehicles.append(merging_v_right2)
+
+        self.vehicle = ego_vehicle
+
+    def _is_terminated(self) -> bool:
+        """The episode is over when a collision occurs or when all merge points have been passed."""
+        total_length = sum(self.ends) + self.one_merge_length * 2  # Total road length including all merge sections
+        return self.vehicle.crashed or bool(self.vehicle.position[0] > total_length)

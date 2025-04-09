@@ -330,6 +330,21 @@ class MultiAgentAction(ActionType):
             ]
         )
 
+class NotiAction(DiscreteMetaAction):
+    def __init__(
+        self,
+        env: AbstractEnv,
+        longitudinal: bool = True,
+        lateral: bool = True,
+        target_speeds: Vector | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(env, longitudinal, lateral, target_speeds, **kwargs)
+
+    def space(self) -> spaces.Tuple:
+        # return spaces.Tuple((spaces.Discrete(2), spaces.Discrete(len(self.actions)), spaces.Discrete(5), spaces.Discrete(len(self.actions))))
+        return spaces.MultiDiscrete([2, len(self.actions)-1, 2, len(self.actions)])
+
 
 def action_factory(env: AbstractEnv, config: dict) -> ActionType:
     if config["type"] == "ContinuousAction":
@@ -340,5 +355,7 @@ def action_factory(env: AbstractEnv, config: dict) -> ActionType:
         return DiscreteMetaAction(env, **config)
     elif config["type"] == "MultiAgentAction":
         return MultiAgentAction(env, **config)
+    elif config["type"] == "NotiAction":
+        return NotiAction(env, **config)
     else:
         raise ValueError("Unknown action type")

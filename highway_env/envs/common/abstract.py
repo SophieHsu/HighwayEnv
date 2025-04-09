@@ -221,7 +221,7 @@ class AbstractEnv(gym.Env):
         """
         raise NotImplementedError()
 
-    def step(self, action: Action) -> tuple[Observation, float, bool, bool, dict]:
+    def step(self, joint_action):
         """
         Perform an action and step the environment dynamics.
 
@@ -235,6 +235,9 @@ class AbstractEnv(gym.Env):
             raise NotImplementedError(
                 "The road and vehicle must be initialized in the environment implementation"
             )
+        
+        action = joint_action[-1]
+        noti_action = tuple(int(x) for x in joint_action[:-1])
 
         self.time += 1 / self.config["policy_frequency"]
         self._simulate(action)
@@ -243,7 +246,8 @@ class AbstractEnv(gym.Env):
         reward = self._reward(action)
         terminated = self._is_terminated()
         truncated = self._is_truncated()
-        info = self._info(obs, action)
+        info = self._info(obs, joint_action)
+        info["noti_action"] = noti_action
         if self.render_mode == "human":
             self.render()
 
