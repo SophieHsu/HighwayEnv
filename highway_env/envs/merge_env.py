@@ -183,6 +183,7 @@ class MultiMergeEnv(MergeEnv):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+    @classmethod
     def default_config(cls) -> dict:
         cfg = super().default_config()
         cfg.update(
@@ -200,7 +201,11 @@ class MultiMergeEnv(MergeEnv):
                     },
                     "absolute": False,
                     "order": "sorted"
-                }
+                },
+                "vehicle_class": "NotiIDMVehicle",
+                "target_speeds": [20, 30, 40],
+                "human_utterance_memory_length": 10,
+                "merge_vehicles_type": "highway_env.vehicle.behavior.AggressiveVehicle",
             }
         )
         return cfg
@@ -216,12 +221,19 @@ class MultiMergeEnv(MergeEnv):
         info = {
             "speed": self.vehicle.speed,
             "crashed": self.vehicle.crashed,
-            "action": action,
         }
-        try:
-            info["rewards"] = self._rewards(action[-1])
-        except NotImplementedError:
-            pass
+        if action is not None:
+            if isinstance(action, np.ndarray):
+                info.update({
+                    "action": action[-1],
+                    "utterance": np.array(action[:-1], dtype=np.float32),
+                })
+            else:
+                info.update({
+                    "action": action,
+                    "utterance": np.zeros(3, dtype=np.float32),  # Default utterance size is 3
+                })
+        info["rewards"] = self._rewards(action[-1] if isinstance(action, np.ndarray) else action)
         return info
 
     def _make_road(self) -> None:
@@ -316,11 +328,13 @@ class MultiMergeEnv(MergeEnv):
 
         # Left merging lane (merges second)
         lmn = StraightLane(
-            [self.one_merge_length, -6.5 - 4 ], [self.one_merge_length+self.ends[0], -6.5 - 4 ], line_types=[c, c], forbidden=True
+            # [self.one_merge_length, -6.5 - 4 ], [self.one_merge_length+self.ends[0], -6.5 - 4 ], line_types=[c, c], forbidden=True
+            [0, -6.5 - 4], [self.one_merge_length+self.ends[0], -6.5 - 4], line_types=[c, c], forbidden=True
+            
         )
         lnb = SineLane(
-            lmn.position(self.ends[0], amplitude),
-            lmn.position(sum(self.ends[:2]), amplitude),
+            lmn.position(self.one_merge_length+self.ends[0], amplitude),
+            lmn.position(self.one_merge_length+sum(self.ends[:2]), amplitude),
             amplitude,
             2 * np.pi / (2 * self.ends[1]),
             -np.pi / 2,
@@ -339,11 +353,11 @@ class MultiMergeEnv(MergeEnv):
 
         # Second right merging lane (merges last)
         lpq = StraightLane(
-            [self.one_merge_length*2, 6.5 + 4 + 4], [self.one_merge_length*2+self.ends[0], 6.5 + 4 + 4], line_types=[c, c], forbidden=True
+            [self.one_merge_length, 6.5 + 4 + 4], [self.one_merge_length*2+self.ends[0], 6.5 + 4 + 4], line_types=[c, c], forbidden=True
         )
         lqb = SineLane(
-            lpq.position(self.ends[0], -amplitude),
-            lpq.position(sum(self.ends[:2]), -amplitude),
+            lpq.position(self.one_merge_length+self.ends[0], -amplitude),
+            lpq.position(self.one_merge_length+sum(self.ends[:2]), -amplitude),
             amplitude,
             2 * np.pi / (2 * self.ends[1]),
             np.pi / 2,
@@ -377,12 +391,18 @@ class MultiMergeEnv(MergeEnv):
         :return: the ego-vehicle
         """
         road = self.road
+        
+        # Create ego vehicle with target_speeds parameter
         ego_vehicle = self.action_type.vehicle_class(
-            road, road.network.get_lane(("a", "b", 1)).position(30, 0), speed=30
+            road, 
+            road.network.get_lane(("a", "b", 1)).position(30, 0), 
+            speed=30,
+            target_speeds=self.config.get("target_speeds", [20, 30, 40])
         )
         road.vehicles.append(ego_vehicle)
 
         other_vehicles_type = utils.class_from_path(self.config["other_vehicles_type"])
+        merge_vehicles_type = utils.class_from_path(self.config["merge_vehicles_type"])
 
         for position, speed in [(90, 29), (70, 31), (5, 31.5), (120, 29.5), (140, 30.0), (170, 27.5), (200, 27.5), (230, 30.5)]:
             lane = road.network.get_lane(("a", "b", self.np_random.integers(2)))
@@ -390,26 +410,26 @@ class MultiMergeEnv(MergeEnv):
             speed += self.np_random.uniform(-1, 1)
             road.vehicles.append(other_vehicles_type(road, position, speed=speed))
 
-        # # First right merging vehicle (merges first)
-        # merging_v_right1 = other_vehicles_type(
-        #     road, road.network.get_lane(("j", "k", 0)).position(40, 0), speed=20
-        # )
-        # merging_v_right1.target_speed = 30
-        # road.vehicles.append(merging_v_right1)
+        # First right merging vehicle (merges first)
+        merging_v_right1 = merge_vehicles_type(
+            road, road.network.get_lane(("j", "k", 0)).position(self.ends[0] - 20, 0), speed=15
+        )
+        merging_v_right1.target_speed = 30
+        road.vehicles.append(merging_v_right1)
 
-        # # Left merging vehicle (merges second)
-        # merging_v_left = other_vehicles_type(
-        #     road, road.network.get_lane(("m", "n", 0)).position(40, 0), speed=10
-        # )
-        # merging_v_left.target_speed = 30
-        # road.vehicles.append(merging_v_left)
+        # Left merging vehicle (merges second)
+        merging_v_left = merge_vehicles_type(
+            road, road.network.get_lane(("m", "n", 0)).position(self.ends[0] - 20, 0), speed=10
+        )
+        merging_v_left.target_speed = 30
+        road.vehicles.append(merging_v_left)
 
-        # # Second right merging vehicle (merges last)
-        # merging_v_right2 = other_vehicles_type(
-        #     road, road.network.get_lane(("p", "q", 0)).position(40, 0), speed=0
-        # )
-        # merging_v_right2.target_speed = 30
-        # road.vehicles.append(merging_v_right2)
+        # Second right merging vehicle (merges last)
+        merging_v_right2 = merge_vehicles_type(
+            road, road.network.get_lane(("p", "q", 0)).position(self.ends[0] - 20, 0), speed=0
+        )
+        merging_v_right2.target_speed = 30
+        road.vehicles.append(merging_v_right2)
 
         self.vehicle = ego_vehicle
 
@@ -417,3 +437,38 @@ class MultiMergeEnv(MergeEnv):
         """The episode is over when a collision occurs or when all merge points have been passed."""
         total_length = sum(self.ends) + self.one_merge_length * 2  # Total road length including all merge sections
         return self.vehicle.crashed or bool(self.vehicle.position[0] > total_length)
+
+    
+    def step(self, joint_action):
+        """
+        Perform an action and step the environment dynamics.
+
+        The action is executed by the ego-vehicle, and all other vehicles on the road performs their default behaviour
+        for several simulation timesteps until the next decision making step.
+
+        :param action: the action performed by the ego-vehicle
+        :return: a tuple (observation, reward, terminated, truncated, info)
+        """
+        if self.road is None or self.vehicle is None:
+            raise NotImplementedError(
+                "The road and vehicle must be initialized in the environment implementation"
+            )
+        
+        action = joint_action[-2]
+        if action == -1:
+            action = None
+        overwrite_flag = joint_action[-1]
+        self.time += 1 / self.config["policy_frequency"]
+        action = None
+        self._simulate(action)
+
+        obs = self.observation_type.observe()
+        reward = self._reward(action)
+        terminated = self._is_terminated()
+        truncated = self._is_truncated()
+        info = self._info(obs, joint_action[:-1])
+        info["overwrite_flag"] = overwrite_flag
+        if self.render_mode == "human":
+            self.render()
+
+        return obs, reward, terminated, truncated, info

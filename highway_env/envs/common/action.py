@@ -10,6 +10,7 @@ from gymnasium import spaces
 from highway_env import utils
 from highway_env.utils import Vector
 from highway_env.vehicle.controller import MDPVehicle
+from highway_env.vehicle.behavior import NotiIDMVehicle
 from highway_env.vehicle.dynamics import BicycleVehicle
 from highway_env.vehicle.kinematics import Vehicle
 
@@ -343,9 +344,12 @@ class NotiAction(DiscreteMetaAction):
 
     def space(self) -> spaces.Tuple:
         # return spaces.Tuple((spaces.Discrete(2), spaces.Discrete(len(self.actions)), spaces.Discrete(5), spaces.Discrete(len(self.actions))))
-        return spaces.MultiDiscrete([2, len(self.actions)-1, 2, len(self.actions)])
+        return spaces.MultiDiscrete([3, len(self.actions)-1, 2, len(self.actions)])
 
-
+    @property
+    def vehicle_class(self) -> Callable:
+        return functools.partial(NotiIDMVehicle, target_speeds=self.target_speeds)
+    
 def action_factory(env: AbstractEnv, config: dict) -> ActionType:
     if config["type"] == "ContinuousAction":
         return ContinuousAction(env, **config)

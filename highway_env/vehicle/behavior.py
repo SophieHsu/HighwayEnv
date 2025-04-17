@@ -5,7 +5,7 @@ import numpy as np
 from highway_env import utils
 from highway_env.road.road import LaneIndex, Road, Route
 from highway_env.utils import Vector
-from highway_env.vehicle.controller import ControlledVehicle
+from highway_env.vehicle.controller import ControlledVehicle, MDPVehicle
 from highway_env.vehicle.kinematics import Vehicle
 
 
@@ -580,3 +580,142 @@ class DefensiveVehicle(LinearVehicle):
         MERGE_ACC_GAIN / (MERGE_VEL_RATIO * MERGE_TARGET_VEL),
         2.0,
     ]
+
+class MergeIDMVehicle(IDMVehicle):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.target_speeds = np.array([30, 30, 30])
+    
+
+    def act(self, action: dict | str = None):
+        """
+        Execute an action.
+
+        For now, no action is supported because the vehicle takes all decisions
+        of acceleration and lane changes on its own, based on the IDM and MOBIL models.
+
+        :param action: the action
+        """
+        if self.crashed:
+            return
+        action = {}
+        # Lateral: MOBIL
+        self.follow_road()
+        if self.enable_lane_change:
+            self.change_lane_policy()
+        action["steering"] = self.steering_control(self.target_lane_index)
+        action["steering"] = np.clip(
+            action["steering"], -self.MAX_STEERING_ANGLE, self.MAX_STEERING_ANGLE
+        )
+
+        # Longitudinal: IDM
+        front_vehicle, rear_vehicle = self.road.neighbour_vehicles(
+            self, self.lane_index
+        )
+        action["acceleration"] = self.acceleration(
+            ego_vehicle=self, front_vehicle=front_vehicle, rear_vehicle=rear_vehicle
+        )
+        # When changing lane, check both current and target lanes
+        if self.lane_index != self.target_lane_index:
+            front_vehicle, rear_vehicle = self.road.neighbour_vehicles(
+                self, self.target_lane_index
+            )
+            target_idm_acceleration = self.acceleration(
+                ego_vehicle=self, front_vehicle=front_vehicle, rear_vehicle=rear_vehicle
+            )
+            action["acceleration"] = min(
+                action["acceleration"], target_idm_acceleration
+            )
+        # action['acceleration'] = self.recover_from_stop(action['acceleration'])
+        action["acceleration"] = np.clip(
+            action["acceleration"], -self.ACC_MAX, self.ACC_MAX
+        )
+        # Skip ControlledVehicle.act(), or the command will be overridden.
+        Vehicle.act(self, action)
+
+class NotiIDMVehicle(IDMVehicle, MDPVehicle):
+    def __init__(self, 
+        *args, 
+        **kwargs
+    ):
+        # Extract target_speeds from kwargs if present
+        target_speeds = kwargs.pop('target_speeds', None)
+        # Initialize parent classes
+        super().__init__(*args, **kwargs)
+        # Set target_speeds after parent initialization
+        if target_speeds is not None:
+            self.target_speeds = np.array(target_speeds)
+            self.speed_index = self.speed_to_index(self.target_speed)
+            self.target_speed = self.index_to_speed(self.speed_index)
+
+    def act(self, action: dict | str = None):
+        """
+        Execute an action.
+
+        For now, no action is supported because the vehicle takes all decisions
+        of acceleration and lane changes on its own, based on the IDM and MOBIL models.
+
+        :param action: the action
+        """
+        if self.crashed:
+            return
+        
+        if action is not None and action != {}:
+            """
+            Perform a high-level action.
+
+            - If the action is a speed change, choose speed from the allowed discrete range.
+            - Else, forward action to the ControlledVehicle handler.
+
+            :param action: a high-level action
+            """
+            if action == "FASTER":
+                self.speed_index = MDPVehicle.speed_to_index(self, self.speed) + 1
+            elif action == "SLOWER":
+                self.speed_index = MDPVehicle.speed_to_index(self, self.speed) - 1
+            else:
+                super().act(action)
+                return
+            self.speed_index = int(
+                np.clip(self.speed_index, 0, self.target_speeds.size - 1)
+            )
+            self.target_speed = MDPVehicle.index_to_speed(self, self.speed_index)
+            super().act()
+
+        else:
+            action = {}
+            # Lateral: MOBIL
+            self.follow_road()
+            if self.enable_lane_change:
+                self.change_lane_policy()
+            action["steering"] = self.steering_control(self.target_lane_index)
+            action["steering"] = np.clip(
+                action["steering"], -self.MAX_STEERING_ANGLE, self.MAX_STEERING_ANGLE
+            )
+
+            # Longitudinal: IDM
+            front_vehicle, rear_vehicle = self.road.neighbour_vehicles(
+                self, self.lane_index
+            )
+            action["acceleration"] = self.acceleration(
+                ego_vehicle=self, front_vehicle=front_vehicle, rear_vehicle=rear_vehicle
+            )
+            # When changing lane, check both current and target lanes
+            if self.lane_index != self.target_lane_index:
+                front_vehicle, rear_vehicle = self.road.neighbour_vehicles(
+                    self, self.target_lane_index
+                )
+                target_idm_acceleration = self.acceleration(
+                    ego_vehicle=self, front_vehicle=front_vehicle, rear_vehicle=rear_vehicle
+                )
+                action["acceleration"] = min(
+                    action["acceleration"], target_idm_acceleration
+                )
+            # action['acceleration'] = self.recover_from_stop(action['acceleration'])
+            action["acceleration"] = np.clip(
+                action["acceleration"], -self.ACC_MAX, self.ACC_MAX
+            )
+            # Skip ControlledVehicle.act(), or the command will be overridden.
+            Vehicle.act(self, action)
+        
+        return
