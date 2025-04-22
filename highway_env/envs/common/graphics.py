@@ -153,6 +153,16 @@ class EnvViewer:
 
         ObservationGraphics.display(self.env.observation_type, self.sim_surface)
 
+        # Render text information if the environment has a get_text_info method
+        if hasattr(self.env, 'get_text_info'):
+            text_info = self.env.get_text_info()
+
+        self.render_text_info(text_info, self.sim_surface)
+            
+        # Render notification history if the environment has a render_notification_history method
+        if hasattr(self.env, 'render_notification_history'):
+            self.env.render_notification_history(self.sim_surface)
+
         if not self.offscreen:
             self.screen.blit(self.sim_surface, (0, 0))
             if self.env.config["real_time_rendering"]:
@@ -165,6 +175,49 @@ class EnvViewer:
                 str(self.directory / f"highway-env_{self.frame}.png"),
             )
             self.frame += 1
+
+    def render_text_info(self, text_info: dict, surface: pygame.Surface) -> None:
+        """Render text information on the given surface."""
+        try:
+            # Try to use Courier font (monospace) first
+            font = pygame.font.SysFont('courier', 14, bold=True)
+        except:
+            # Fallback to default monospace font
+            font = pygame.font.Font(None, 14)
+            
+        y_offset = 5
+        x_offset = 5
+        line_spacing = 16  # Reduced line spacing for more compact display
+        
+        # Draw text
+        current_y = y_offset
+        for text, color in text_info.items():
+            if text == "rewards_info":
+                continue
+            if "\n" in text:
+                lines = text.split("\n")
+                for line in lines:
+                    text_surface = font.render(line, True, color)
+                    surface.blit(text_surface, (x_offset, current_y))
+                    current_y += line_spacing
+            else:
+                text_surface = font.render(text, True, color)
+                surface.blit(text_surface, (x_offset, current_y))
+                current_y += line_spacing
+        
+        current_y = y_offset
+        # Draw rewards text
+        if "rewards_info" in text_info:
+            rewards_text = text_info["rewards_info"]
+            rewards_lines = rewards_text.split("\n")
+            
+            # Calculate position for rewards (right side)
+            rewards_x_offset = surface.get_width() - 188 - 30
+
+            for line in rewards_lines:
+                text_surface = font.render(line, True, (255, 255, 255))
+                surface.blit(text_surface, (rewards_x_offset + 5, current_y))
+                current_y += line_spacing
 
     def get_image(self) -> np.ndarray:
         """

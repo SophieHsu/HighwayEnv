@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from highway_env import utils
+from highway_env.vehicle.objects import Landmark
 from highway_env.road.road import LaneIndex, Road, Route
 from highway_env.utils import Vector
 from highway_env.vehicle.controller import ControlledVehicle, MDPVehicle
@@ -585,7 +586,128 @@ class MergeIDMVehicle(IDMVehicle):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.target_speeds = np.array([30, 30, 30])
+        self.merge_lane_indices = [('b', 'c', 2), ('c0', 'd', 2), ('d', 'e', 2), ('e', 'f', 2), ('f', 'g', 2)]
+
+    def change_lane_policy(self) -> None:
+        """
+        Decide when to change lane.
+
+        Based on:
+        - frequency;
+        - closeness of the target lane;
+        - MOBIL model.
+        """
+        # If a lane change is already ongoing
+        if self.lane_index != self.target_lane_index:
+            # If we are on correct route but bad lane: abort it if someone else is already changing into the same lane
+            if self.lane_index[:2] == self.target_lane_index[:2]:
+                for v in self.road.vehicles:
+
+                    if self.lane_index in self.merge_lane_indices:
+                        additional_condition = not isinstance(v, NotiIDMVehicle)
+                    else:
+                        additional_condition = True
+
+                    if (
+                        v is not self
+                        and v.lane_index != self.target_lane_index
+                        and isinstance(v, ControlledVehicle)
+                        and v.target_lane_index == self.target_lane_index
+                        and additional_condition
+                    ):
+                        d = self.lane_distance_to(v)
+                        d_star = self.desired_gap(self, v)
+                        if 0 < d < d_star:
+                            self.target_lane_index = self.lane_index
+                            break
+            return
+
+        # else, at a given frequency,
+        if not utils.do_every(self.LANE_CHANGE_DELAY, self.timer):
+            return
+        self.timer = 0
+
+        # decide to make a lane change
+        for lane_index in self.road.network.side_lanes(self.lane_index):
+            # Is the candidate lane close enough?
+            if not self.road.network.get_lane(lane_index).is_reachable_from(
+                self.position
+            ):
+                continue
+            # Only change lane when the vehicle is moving
+            if np.abs(self.speed) < 1:
+                continue
+            # Does the MOBIL model recommend a lane change?
+            if self.mobil(lane_index):
+                self.target_lane_index = lane_index
+
     
+    def mobil(self, lane_index: LaneIndex) -> bool:
+        """
+        MOBIL lane change model: Minimizing Overall Braking Induced by a Lane change
+
+            The vehicle should change lane only if:
+            - after changing it (and/or following vehicles) can accelerate more;
+            - it doesn't impose an unsafe braking on its new following vehicle.
+
+        :param lane_index: the candidate lane for the change
+        :return: whether the lane change should be performed
+        """
+        # Is the maneuver unsafe for the new following vehicle?
+        if self.lane_index in self.merge_lane_indices:
+            additional_condition = NotiIDMVehicle
+        else:
+            additional_condition = Landmark
+        
+        new_preceding, new_following = self.road.neighbour_vehicles(self, lane_index, target_vehicle_class=additional_condition)
+        new_following_a = self.acceleration(
+            ego_vehicle=new_following, front_vehicle=new_preceding
+        )
+        new_following_pred_a = self.acceleration(
+            ego_vehicle=new_following, front_vehicle=self
+        )
+        if new_following_pred_a < -self.LANE_CHANGE_MAX_BRAKING_IMPOSED:
+            return False
+
+        # Do I have a planned route for a specific lane which is safe for me to access?
+        old_preceding, old_following = self.road.neighbour_vehicles(self, target_vehicle_class=additional_condition)
+        self_pred_a = self.acceleration(ego_vehicle=self, front_vehicle=new_preceding)
+        if self.route and self.route[0][2] is not None:
+            # Wrong direction
+            if np.sign(lane_index[2] - self.target_lane_index[2]) != np.sign(
+                self.route[0][2] - self.target_lane_index[2]
+            ):
+                return False
+            # Unsafe braking required
+            elif self_pred_a < -self.LANE_CHANGE_MAX_BRAKING_IMPOSED:
+                return False
+
+        # Is there an acceleration advantage for me and/or my followers to change lane?
+        else:
+            self_a = self.acceleration(ego_vehicle=self, front_vehicle=old_preceding)
+            old_following_a = self.acceleration(
+                ego_vehicle=old_following, front_vehicle=self
+            )
+            old_following_pred_a = self.acceleration(
+                ego_vehicle=old_following, front_vehicle=old_preceding
+            )
+            jerk = (
+                self_pred_a
+                - self_a
+                + self.POLITENESS
+                * (
+                    new_following_pred_a
+                    - new_following_a
+                    + old_following_pred_a
+                    - old_following_a
+                )
+            )
+            if jerk < self.LANE_CHANGE_MIN_ACC_GAIN:
+                return False
+
+        # All clear, let's go!
+        return True
+
 
     def act(self, action: dict | str = None):
         """
@@ -616,9 +738,13 @@ class MergeIDMVehicle(IDMVehicle):
             ego_vehicle=self, front_vehicle=front_vehicle, rear_vehicle=rear_vehicle
         )
         # When changing lane, check both current and target lanes
+        if self.lane_index in self.merge_lane_indices:
+            additional_condition = NotiIDMVehicle
+        else:
+            additional_condition = Landmark
         if self.lane_index != self.target_lane_index:
             front_vehicle, rear_vehicle = self.road.neighbour_vehicles(
-                self, self.target_lane_index
+                self, self.target_lane_index, target_vehicle_class=additional_condition
             )
             target_idm_acceleration = self.acceleration(
                 ego_vehicle=self, front_vehicle=front_vehicle, rear_vehicle=rear_vehicle
@@ -648,6 +774,74 @@ class NotiIDMVehicle(IDMVehicle, MDPVehicle):
             self.speed_index = self.speed_to_index(self.target_speed)
             self.target_speed = self.index_to_speed(self.speed_index)
 
+        self.merge_lane_indices = [('b', 'c', 1), ('c0', 'd', 0), ('d', 'e', 0), ('e', 'f', 1), ('f', 'g', 1)]
+    
+    def mobil(self, lane_index: LaneIndex) -> bool:
+        """
+        MOBIL lane change model: Minimizing Overall Braking Induced by a Lane change
+
+            The vehicle should change lane only if:
+            - after changing it (and/or following vehicles) can accelerate more;
+            - it doesn't impose an unsafe braking on its new following vehicle.
+
+        :param lane_index: the candidate lane for the change
+        :return: whether the lane change should be performed
+        """
+        # Is the maneuver unsafe for the new following vehicle?
+        if self.lane_index in self.merge_lane_indices:
+            additional_condition = MergeIDMVehicle
+        else:
+            additional_condition = Landmark
+        
+        new_preceding, new_following = self.road.neighbour_vehicles(self, lane_index, target_vehicle_class=additional_condition)
+        new_following_a = self.acceleration(
+            ego_vehicle=new_following, front_vehicle=new_preceding
+        )
+        new_following_pred_a = self.acceleration(
+            ego_vehicle=new_following, front_vehicle=self
+        )
+        if new_following_pred_a < -self.LANE_CHANGE_MAX_BRAKING_IMPOSED:
+            return False
+
+        # Do I have a planned route for a specific lane which is safe for me to access?
+        old_preceding, old_following = self.road.neighbour_vehicles(self, target_vehicle_class=additional_condition)
+        self_pred_a = self.acceleration(ego_vehicle=self, front_vehicle=new_preceding)
+        if self.route and self.route[0][2] is not None:
+            # Wrong direction
+            if np.sign(lane_index[2] - self.target_lane_index[2]) != np.sign(
+                self.route[0][2] - self.target_lane_index[2]
+            ):
+                return False
+            # Unsafe braking required
+            elif self_pred_a < -self.LANE_CHANGE_MAX_BRAKING_IMPOSED:
+                return False
+
+        # Is there an acceleration advantage for me and/or my followers to change lane?
+        else:
+            self_a = self.acceleration(ego_vehicle=self, front_vehicle=old_preceding)
+            old_following_a = self.acceleration(
+                ego_vehicle=old_following, front_vehicle=self
+            )
+            old_following_pred_a = self.acceleration(
+                ego_vehicle=old_following, front_vehicle=old_preceding
+            )
+            jerk = (
+                self_pred_a
+                - self_a
+                + self.POLITENESS
+                * (
+                    new_following_pred_a
+                    - new_following_a
+                    + old_following_pred_a
+                    - old_following_a
+                )
+            )
+            if jerk < self.LANE_CHANGE_MIN_ACC_GAIN:
+                return False
+
+        # All clear, let's go!
+        return True
+    
     def act(self, action: dict | str = None):
         """
         Execute an action.
@@ -674,14 +868,16 @@ class NotiIDMVehicle(IDMVehicle, MDPVehicle):
             elif action == "SLOWER":
                 self.speed_index = MDPVehicle.speed_to_index(self, self.speed) - 1
             else:
-                super().act(action)
+                ControlledVehicle.act(self, action)
                 return
             self.speed_index = int(
                 np.clip(self.speed_index, 0, self.target_speeds.size - 1)
             )
             self.target_speed = MDPVehicle.index_to_speed(self, self.speed_index)
-            super().act()
-
+            ControlledVehicle.act(self)
+            self.action["acceleration"] = np.clip(
+                self.action["acceleration"], -self.ACC_MAX, self.ACC_MAX
+            )
         else:
             action = {}
             # Lateral: MOBIL

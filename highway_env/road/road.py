@@ -478,7 +478,7 @@ class Road:
                 vehicle.handle_collisions(other, dt)
 
     def neighbour_vehicles(
-        self, vehicle: kinematics.Vehicle, lane_index: LaneIndex = None
+        self, vehicle: kinematics.Vehicle, lane_index: LaneIndex = None, target_vehicle_class = Landmark
     ) -> tuple[kinematics.Vehicle | None, kinematics.Vehicle | None]:
         """
         Find the preceding and following vehicles of a given vehicle.
@@ -499,7 +499,7 @@ class Road:
         for v in self.vehicles + self.objects:
             if v is not vehicle and not isinstance(
                 v, Landmark
-            ):  # self.network.is_connected_road(v.lane_index,
+            ) and not isinstance(v, target_vehicle_class):  # self.network.is_connected_road(v.lane_index,
                 # lane_index, same_lane=True):
                 s_v, lat_v = lane.local_coordinates(v.position)
                 if not lane.on_lane(v.position, s_v, lat_v, margin=1):

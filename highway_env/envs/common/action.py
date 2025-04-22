@@ -344,7 +344,8 @@ class NotiAction(DiscreteMetaAction):
 
     def space(self) -> spaces.Tuple:
         # return spaces.Tuple((spaces.Discrete(2), spaces.Discrete(len(self.actions)), spaces.Discrete(5), spaces.Discrete(len(self.actions))))
-        return spaces.MultiDiscrete([3, len(self.actions)-1, 2, len(self.actions)])
+        return spaces.MultiDiscrete([3, len(self.actions)-1, 1, len(self.actions)])
+        # return spaces.MultiDiscrete([3, len(self.actions)-1, 2, len(self.actions)])
 
     @property
     def vehicle_class(self) -> Callable:
